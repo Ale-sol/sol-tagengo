@@ -264,6 +264,12 @@ export default function Browse({ settings }) {
                   </svg>
                   Sign in with Google
                 </button>
+                <p className="text-white/20 text-[10px] mt-3 max-w-xs break-all text-center">
+                  Redirect URI:{' '}
+                  <span className="text-yellow-400/60 select-all">
+                    {(window.location.origin + window.location.pathname).replace(/\/$/, '')}
+                  </span>
+                </p>
               </div>
             )}
 
