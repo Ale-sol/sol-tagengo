@@ -13,6 +13,7 @@ const DEFAULTS = {
   openaiApiKey: '',
   youtubeApiKey: '',
   googleOAuthClientId: '',
+  gladiaApiKey: '',
 
   // Caption proxy
   proxyUrl: '',
