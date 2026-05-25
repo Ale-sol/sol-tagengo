@@ -16,7 +16,40 @@ export const LANGUAGE_CODES = {
   Hindi: 'hi',
 }
 
-const INNERTUBE_URL = 'https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8'
+// InnerTube client configs — tried in order until one works
+const CLIENTS = [
+  {
+    name: 'ANDROID',
+    key: 'AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w',
+    context: {
+      clientName: 'ANDROID',
+      clientVersion: '17.31.35',
+      androidSdkVersion: 30,
+      hl: 'en',
+      gl: 'US',
+    },
+  },
+  {
+    name: 'WEB',
+    key: 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8',
+    context: {
+      clientName: 'WEB',
+      clientVersion: '2.20240101.00.00',
+      hl: 'en',
+      gl: 'US',
+    },
+  },
+  {
+    name: 'TV_EMBEDDED',
+    key: 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8',
+    context: {
+      clientName: 'TVHTML5_SIMPLY_EMBEDDED_PLAYER',
+      clientVersion: '2.0',
+      hl: 'en',
+      gl: 'US',
+    },
+  },
+]
 
 export async function loadCaptions(videoId, videoMeta, settings, onProgress) {
   const lang = settings.targetLanguage || 'Japanese'
@@ -36,17 +69,25 @@ export async function loadCaptions(videoId, videoMeta, settings, onProgress) {
 
   onProgress?.('Fetching from YouTube…', 20)
 
-  // Step 1: get signed caption URL from InnerTube
   let captionUrl
-  try {
-    captionUrl = await getSignedCaptionUrl(videoId, langCode, lang, proxy)
-  } catch (e) {
-    throw new Error(e.message)
+  const errors = []
+
+  // Try each client until one returns a playable response with captions
+  for (const client of CLIENTS) {
+    try {
+      captionUrl = await getSignedCaptionUrl(videoId, langCode, lang, proxy, client)
+      if (captionUrl) break
+    } catch (e) {
+      errors.push(`${client.name}: ${e.message}`)
+    }
   }
 
-  onProgress?.('Downloading captions…', 50)
+  if (!captionUrl) {
+    throw new Error(`Could not get captions. Tried all clients:\n${errors.join('\n')}`)
+  }
 
-  // Step 2: fetch the caption data using the signed URL
+  onProgress?.('Downloading captions…', 55)
+
   let raw
   try {
     raw = await fetchCaption(captionUrl, proxy)
@@ -55,10 +96,10 @@ export async function loadCaptions(videoId, videoMeta, settings, onProgress) {
   }
 
   if (!raw?.length) {
-    throw new Error('Captions loaded but appear empty. Try a different video to confirm the setup works.')
+    throw new Error('Captions returned empty. This video may have no speech content.')
   }
 
-  onProgress?.('Fixing sentence breaks with AI…', 65)
+  onProgress?.('Fixing sentence breaks with AI…', 70)
 
   let processed
   try {
@@ -74,61 +115,43 @@ export async function loadCaptions(videoId, videoMeta, settings, onProgress) {
   return processed
 }
 
-async function getSignedCaptionUrl(videoId, langCode, langName, proxy) {
-  // Call YouTube's internal player API to get the signed caption URL
-  const body = JSON.stringify({
-    videoId,
-    context: {
-      client: {
-        clientName: 'WEB',
-        clientVersion: '2.20240101.00.00',
-        hl: 'en',
-        gl: 'US',
-      },
-    },
-  })
-
-  const proxied = `${proxy}?url=${encodeURIComponent(INNERTUBE_URL)}`
+async function getSignedCaptionUrl(videoId, langCode, langName, proxy, client) {
+  const url = `https://www.youtube.com/youtubei/v1/player?key=${client.key}`
+  const proxied = `${proxy}?url=${encodeURIComponent(url)}`
 
   const res = await fetch(proxied, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body,
+    body: JSON.stringify({
+      videoId,
+      context: { client: client.context },
+    }),
   })
 
-  if (!res.ok) {
-    throw new Error(`YouTube API returned HTTP ${res.status}. Check your Worker supports POST requests.`)
-  }
-
-  const text = await res.text()
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
 
   let data
   try {
-    data = JSON.parse(text)
+    data = await res.json()
   } catch {
-    throw new Error(`YouTube returned invalid data. First 100 chars: ${text.slice(0, 100)}`)
+    throw new Error('Invalid JSON response')
   }
 
-  if (data.error) {
-    throw new Error(`YouTube error: ${data.error.message}`)
+  const status = data?.playabilityStatus?.status
+  if (status && status !== 'OK') {
+    throw new Error(`Video status: ${status}`)
   }
 
   const tracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks
-
   if (!tracks?.length) {
-    // Check if the video is available at all
-    const status = data?.playabilityStatus?.status
-    if (status && status !== 'OK') {
-      throw new Error(`Video not available: ${status}`)
-    }
-    throw new Error(`No captions found for this video in any language.`)
+    throw new Error('No caption tracks in response')
   }
 
   // Find best matching track
   const manual = tracks.find(t => t.languageCode === langCode && t.kind !== 'asr')
-  const asr = tracks.find(t => t.languageCode === langCode)
-  const base = tracks.find(t => t.languageCode?.startsWith(langCode.split('-')[0]))
-  const track = manual || asr || base
+  const asr    = tracks.find(t => t.languageCode === langCode)
+  const base   = tracks.find(t => t.languageCode?.startsWith(langCode.split('-')[0]))
+  const track  = manual || asr || base
 
   if (!track) {
     const available = tracks.map(t =>
@@ -137,32 +160,27 @@ async function getSignedCaptionUrl(videoId, langCode, langName, proxy) {
     throw new Error(`No ${langName} captions. Available: ${available}`)
   }
 
-  // Use the signed baseUrl from YouTube — add json3 format
-  let url = track.baseUrl
-  // Replace any existing fmt parameter, or add json3
-  url = url.replace(/([?&])fmt=[^&]*/g, '')
-  url += (url.includes('?') ? '&' : '?') + 'fmt=json3'
+  // Build URL with json3 format
+  let trackUrl = track.baseUrl
+  trackUrl = trackUrl.replace(/([?&])fmt=[^&]*/g, '')
+  trackUrl += (trackUrl.includes('?') ? '&' : '?') + 'fmt=json3'
 
-  return url
+  return trackUrl
 }
 
 async function fetchCaption(captionUrl, proxy) {
   const proxied = `${proxy}?url=${encodeURIComponent(captionUrl)}`
   const res = await fetch(proxied)
-
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} fetching caption data`)
-  }
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
 
   const text = await res.text()
-
-  if (!text) throw new Error('Empty response from YouTube')
+  if (!text) throw new Error('Empty response')
 
   let data
   try {
     data = JSON.parse(text)
   } catch {
-    throw new Error(`YouTube returned non-JSON: ${text.slice(0, 80)}`)
+    throw new Error(`Non-JSON response: ${text.slice(0, 80)}`)
   }
 
   return parseJSON3(data)
@@ -171,7 +189,6 @@ async function fetchCaption(captionUrl, proxy) {
 function parseJSON3(data) {
   const events = data?.events || []
   const segments = []
-
   for (const event of events) {
     if (!event.segs || event.tStartMs === undefined) continue
     const text = event.segs.map(s => s.utf8 || '').join('').replace(/\n/g, ' ').trim()
@@ -182,6 +199,5 @@ function parseJSON3(data) {
       text,
     })
   }
-
   return segments
 }
