@@ -95,7 +95,7 @@ export async function loadCaptions(videoId, videoMeta, settings, onProgress) {
 
 /** Fetch YouTube captions via CORS proxy or direct */
 async function fetchYouTubeCaptions(videoId, langCode, settings) {
-  const timedtextUrl = `https://www.youtube.com/api/timedtext?v=${videoId}&lang=${langCode}&fmt=json3&xorb=2&xobt=3&xovt=3`
+  const timedtextUrl = `https://www.youtube.com/api/timedtext?v=${videoId}&lang=${langCode}&fmt=json3&kind=asr&xorb=2&xobt=3&xovt=3`
 
   let url
   if (settings.proxyUrl) {
