@@ -2,18 +2,9 @@ import { fixCaptions } from './llm.js'
 import { getCachedCaptions, setCachedCaptions } from './storage.js'
 
 export const LANGUAGE_CODES = {
-  Polish: 'pl',
-  Japanese: 'ja',
-  Spanish: 'es',
-  French: 'fr',
-  German: 'de',
-  Italian: 'it',
-  Portuguese: 'pt',
-  Russian: 'ru',
-  Arabic: 'ar',
-  Chinese: 'zh-Hans',
-  Korean: 'ko',
-  Hindi: 'hi',
+  Polish: 'pl', Japanese: 'ja', Spanish: 'es', French: 'fr', German: 'de',
+  Italian: 'it', Portuguese: 'pt', Russian: 'ru', Arabic: 'ar',
+  Chinese: 'zh-Hans', Korean: 'ko', Hindi: 'hi',
 }
 
 export async function loadCaptions(videoId, videoMeta, settings, onProgress) {
@@ -29,42 +20,37 @@ export async function loadCaptions(videoId, videoMeta, settings, onProgress) {
 
   onProgress?.('Fetching captions from YouTube…', 25)
 
-  // Single call to Worker's /captions endpoint
-  // The Worker handles InnerTube + caption fetch internally (same IP = signed URLs work)
   let data
   try {
+    const body = { videoId, langCode }
+    // Pass real YouTube cookie if configured — bypasses Cloudflare IP block
+    if (settings.youtubeCookie?.trim()) body.cookie = settings.youtubeCookie.trim()
+
     const res = await fetch(`${proxy}/captions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ videoId, langCode }),
+      body: JSON.stringify(body),
     })
     data = await res.json()
 
     if (!res.ok) {
-      if (data?.error === 'NO_LANG') {
-        throw new Error(`No ${lang} captions available. Languages found: ${data.available}`)
-      }
-      throw new Error(data?.details?.join(' | ') || `Worker error ${res.status}`)
+      if (data?.error === 'NO_LANG') throw new Error(`No ${lang} captions. Languages found: ${data.available}`)
+      const hint = !settings.youtubeCookie ? ' Try adding YouTube cookies in Settings.' : ''
+      throw new Error((data?.details?.join(' | ') || `Worker error ${res.status}`) + hint)
     }
   } catch (e) {
-    if (e.message.includes('captions') || e.message.includes('Worker')) throw e
+    if (e.message.includes('captions') || e.message.includes('Worker') || e.message.includes('cookie')) throw e
     throw new Error(`Could not reach caption proxy: ${e.message}`)
   }
 
-  onProgress?.('Processing captions…', 55)
-
+  onProgress?.('Processing…', 55)
   const raw = parseJSON3(data)
-  if (!raw?.length) throw new Error('Captions returned empty content.')
+  if (!raw?.length) throw new Error('Captions empty for this video.')
 
   onProgress?.('Fixing sentence breaks with AI…', 70)
-
   let processed
-  try {
-    processed = await fixCaptions(raw, lang, videoMeta.title, videoMeta.description, settings)
-  } catch (e) {
-    console.warn('LLM fix skipped:', e.message)
-    processed = raw
-  }
+  try { processed = await fixCaptions(raw, lang, videoMeta.title, videoMeta.description, settings) }
+  catch (e) { console.warn('LLM fix skipped:', e.message); processed = raw }
 
   onProgress?.('Saving…', 95)
   await setCachedCaptions(videoId, lang, processed)
