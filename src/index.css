@@ -1,0 +1,59 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+  }
+
+  html, body, #root {
+    height: 100%;
+    background: #0a0a0a;
+    color: #ffffff;
+    font-family: 'IBM Plex Sans', sans-serif;
+    overscroll-behavior: none;
+  }
+
+  ::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+
+  /* YouTube iframe — no pointer events on the iframe itself so our overlay catches taps */
+  .yt-player-container iframe {
+    pointer-events: auto;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply flex items-center justify-center gap-2 rounded-xl font-sans font-medium transition-all duration-150 active:scale-95 select-none;
+  }
+  .btn-primary {
+    @apply btn bg-accent text-black px-4 py-2.5 text-sm;
+  }
+  .btn-ghost {
+    @apply btn text-white/60 hover:text-white px-3 py-2 text-sm;
+  }
+  .input {
+    @apply w-full bg-surface border border-border rounded-xl px-4 py-3 text-sm text-white placeholder-white/30 focus:outline-none focus:border-accent/50 transition-colors;
+  }
+  .card {
+    @apply bg-surface border border-border rounded-2xl overflow-hidden;
+  }
+
+  /* Word highlight states */
+  .word-new {
+    @apply bg-word-new text-word-new-text rounded px-0.5 cursor-pointer;
+  }
+  .word-learning {
+    @apply bg-word-learning text-word-learning-text rounded px-0.5 cursor-pointer;
+  }
+  .word-known {
+    @apply cursor-pointer hover:bg-white/5 rounded px-0.5 transition-colors;
+  }
+}
