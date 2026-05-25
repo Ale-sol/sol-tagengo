@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
 import { PROVIDERS } from '../lib/llm.js'
 import { LANGUAGE_CODES } from '../lib/captions.js'
-import { exportProfile, importProfile } from '../lib/storage.js'
+import { exportProfile, importProfile, getAllSettings } from '../lib/storage.js'
+import { saveToGoogleDrive, loadFromGoogleDrive } from '../lib/driveSync.js'
 
 const LANGUAGES = Object.keys(LANGUAGE_CODES)
 
@@ -95,6 +96,36 @@ export default function Settings({ settings, onUpdate, onUpdateMany }) {
   const [isDirty, setIsDirty] = useState(false)
   const [saveState, setSaveState] = useState('idle') // 'idle' | 'saving' | 'saved'
   const [importError, setImportError] = useState('')
+  const [driveMsg, setDriveMsg] = useState('')
+
+  const driveToken = localStorage.getItem('yt_access_token')
+
+  async function handleDriveSave() {
+    if (!driveToken) { setDriveMsg('Sign in to Google first (Browse → Subscriptions tab)'); return }
+    setDriveMsg('Saving to Drive…')
+    try {
+      const { getAllSettings, getWordsByLanguage } = await import('../lib/storage.js')
+      const savedSettings = await getAllSettings()
+      const LANGS = ['Japanese', 'Polish', 'Spanish', 'French', 'German', 'Italian', 'Portuguese', 'Russian', 'Arabic', 'Chinese', 'Korean', 'Hindi']
+      const words = []
+      for (const lang of LANGS) words.push(...await getWordsByLanguage(lang))
+      await saveToGoogleDrive(driveToken, { version: 1, settings: savedSettings, words })
+      setDriveMsg('✓ Saved to Google Drive')
+    } catch (e) { setDriveMsg(`Error: ${e.message}`) }
+    setTimeout(() => setDriveMsg(''), 5000)
+  }
+
+  async function handleDriveLoad() {
+    if (!driveToken) { setDriveMsg('Sign in to Google first (Browse → Subscriptions tab)'); return }
+    setDriveMsg('Loading from Drive…')
+    try {
+      const data = await loadFromGoogleDrive(driveToken)
+      if (!data) { setDriveMsg('No profile found on Drive yet'); return }
+      await importProfile(JSON.stringify(data))
+      setDriveMsg('✓ Loaded — reload the page to apply')
+    } catch (e) { setDriveMsg(`Error: ${e.message}`) }
+    setTimeout(() => setDriveMsg(''), 5000)
+  }
 
   // Sync draft when settings load from DB initially
   useEffect(() => {
@@ -321,6 +352,39 @@ export default function Settings({ settings, onUpdate, onUpdateMany }) {
           <p className="text-white/25 text-xs mt-2">
             Word progress is saved. API keys are excluded from exports.
           </p>
+
+          {/* Google Drive sync */}
+          <div className="mt-4 pt-4 border-t border-border">
+            <p className="text-white/40 text-xs font-sans mb-3">Google Drive sync — works across all your devices</p>
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={handleDriveSave}
+                className="flex items-center justify-center gap-2 py-3 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-400 text-sm font-sans hover:bg-blue-500/20 transition-colors active:scale-[0.97]"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-4 h-4">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 16.5V9.75m0 0l3 3m-3-3l-3 3M6.75 19.5a4.5 4.5 0 01-1.41-8.775 5.25 5.25 0 0110.338-2.32 5.75 5.75 0 011.72 11.095" />
+                </svg>
+                Save to Drive
+              </button>
+              <button
+                type="button"
+                onClick={handleDriveLoad}
+                className="flex items-center justify-center gap-2 py-3 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-400 text-sm font-sans hover:bg-blue-500/20 transition-colors active:scale-[0.97]"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-4 h-4">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9.75v6.75m0 0l-3-3m3 3l3-3m-8.25 6a4.5 4.5 0 01-1.41-8.775 5.25 5.25 0 0110.338-2.32 5.75 5.75 0 011.72 11.095" />
+                </svg>
+                Load from Drive
+              </button>
+            </div>
+            {driveMsg && (
+              <p className={`text-xs mt-2 font-sans ${driveMsg.startsWith('✓') ? 'text-green-400' : driveMsg.startsWith('Error') ? 'text-red-400' : 'text-white/40'}`}>
+                {driveMsg}
+              </p>
+            )}
+            <p className="text-white/20 text-xs mt-2">Requires Google sign-in (Browse → Subscriptions). API keys are never synced.</p>
+          </div>
         </Section>
 
       </div>
