@@ -1,352 +1,133 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
-import { getVideo } from '../lib/youtube.js'
-import { loadCaptions } from '../lib/captions.js'
-import { translateSentence } from '../lib/llm.js'
-import { recordSeen } from '../lib/wordTracker.js'
-import SubtitlePanel from '../components/SubtitlePanel.jsx'
-import PlaybackControls from '../components/PlaybackControls.jsx'
-import WordPopup from '../components/WordPopup.jsx'
+/**
+ * Caption fetching via Gladia's Whisper API.
+ * Gladia accepts YouTube URLs directly — their servers fetch the audio,
+ * so our IP (or any cloud IP) is never blocked by YouTube.
+ *
+ * Free tier: 10 hours/month recurring. Get a key at app.gladia.io
+ */
 
-// ── YouTube IFrame Player loader ──────────────────────────────────────────────
-let ytAPIPromise = null
-function loadYouTubeAPI() {
-  if (ytAPIPromise) return ytAPIPromise
-  ytAPIPromise = new Promise(resolve => {
-    if (window.YT?.Player) { resolve(window.YT); return }
-    const script = document.createElement('script')
-    script.src = 'https://www.youtube.com/iframe_api'
-    document.head.appendChild(script)
-    window.onYouTubeIframeAPIReady = () => resolve(window.YT)
-  })
-  return ytAPIPromise
+import { getCachedCaptions, setCachedCaptions } from './storage.js'
+
+export const LANGUAGE_CODES = {
+  Polish: 'pl', Japanese: 'ja', Spanish: 'es', French: 'fr', German: 'de',
+  Italian: 'it', Portuguese: 'pt', Russian: 'ru', Arabic: 'ar',
+  Chinese: 'zh-Hans', Korean: 'ko', Hindi: 'hi',
 }
 
-export default function Study({ settings }) {
-  const { videoId } = useParams()
-  const navigate = useNavigate()
+const GLADIA_BASE = 'https://api.gladia.io/v2'
+const sleep = ms => new Promise(r => setTimeout(r, ms))
 
-  const [video, setVideo] = useState(null)
-  const [captions, setCaptions] = useState([])
-  const [currentIndex, setCurrentIndex] = useState(0)
-  const [isPlaying, setIsPlaying] = useState(false)
-  const [loadingPhase, setLoadingPhase] = useState('video') // 'video' | 'captions' | 'done' | 'error'
-  const [loadingMsg, setLoadingMsg] = useState('Loading video…')
-  const [loadingPct, setLoadingPct] = useState(0)
-  const [captionChoice, setCaptionChoice] = useState(null) // null = not chosen yet, 'ai' | 'done'
-  const [translation, setTranslation] = useState('')
-  const [wordPopup, setWordPopup] = useState(null) // { word, sentence }
+export async function loadCaptions(videoId, videoMeta, settings, onProgress) {
+  const lang = settings.targetLanguage || 'Japanese'
 
-  const playerRef = useRef(null)
-  const playerDivRef = useRef(null)
-  const syncIntervalRef = useRef(null)
-  const lang = settings?.targetLanguage || 'Japanese'
-  const intensiveMode = settings?.immersionMode !== 'free'
+  // Check cache first
+  const cached = await getCachedCaptions(videoId, lang)
+  if (cached) { onProgress?.('Loaded from cache', 100); return cached }
 
-  // ── Load video metadata ───────────────────────────────────────────────────
+  const apiKey = settings.gladiaApiKey?.trim()
+  if (!apiKey) throw new Error('No Gladia API key. Get a free key at app.gladia.io then add it in Settings.')
 
-  useEffect(() => {
-    if (!videoId) return
-    getVideo(videoId, settings)
-      .then(v => {
-        setVideo(v)
-        setLoadingPhase('caption-choice')
-      })
-      .catch(e => {
-        setLoadingMsg(e.message)
-        setLoadingPhase('error')
-      })
-  }, [videoId])
+  onProgress?.('Submitting to Gladia…', 8)
 
-  // ── Init YouTube Player ───────────────────────────────────────────────────
+  // Submit transcription job with YouTube URL
+  const submitRes = await fetch(`${GLADIA_BASE}/pre-recorded`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-gladia-key': apiKey },
+    body: JSON.stringify({
+      audio_url: `https://www.youtube.com/watch?v=${videoId}`,
+      detect_language: true,
+      sentences: true,
+      context_prompt: videoMeta?.title || '',
+    }),
+  })
 
-  useEffect(() => {
-    if (!videoId) return
-    let player
-
-    async function init() {
-      const YT = await loadYouTubeAPI()
-      player = new YT.Player(playerDivRef.current, {
-        videoId,
-        playerVars: {
-          controls: 0,
-          disablekb: 1,
-          modestbranding: 1,
-          rel: 0,
-          playsinline: 1,
-        },
-        events: {
-          onStateChange: (e) => {
-            setIsPlaying(e.data === 1)
-          },
-        },
-      })
-      playerRef.current = player
-    }
-
-    init()
-
-    return () => {
-      clearInterval(syncIntervalRef.current)
-      player?.destroy?.()
-    }
-  }, [videoId])
-
-  // ── Subtitle sync loop ────────────────────────────────────────────────────
-
-  useEffect(() => {
-    clearInterval(syncIntervalRef.current)
-    if (!captions.length) return
-
-    syncIntervalRef.current = setInterval(() => {
-      const player = playerRef.current
-      if (!player?.getCurrentTime) return
-      const t = player.getCurrentTime() * 1000 // ms
-
-      const idx = captions.findIndex((c, i) => {
-        const next = captions[i + 1]
-        return t >= c.start && (!next || t < next.start)
-      })
-      if (idx !== -1 && idx !== currentIndex) {
-        handleIndexChange(idx)
-      }
-    }, 150)
-
-    return () => clearInterval(syncIntervalRef.current)
-  }, [captions, currentIndex])
-
-  // ── Translate current subtitle ────────────────────────────────────────────
-
-  useEffect(() => {
-    const cap = captions[currentIndex]
-    if (!cap || !settings?.showTranslation) { setTranslation(''); return }
-
-    let cancelled = false
-    translateSentence(cap.text, lang, settings).then(t => {
-      if (!cancelled) setTranslation(t)
-    }).catch(() => {})
-
-    return () => { cancelled = true }
-  }, [currentIndex, captions, settings?.showTranslation])
-
-  // ── Caption loading ───────────────────────────────────────────────────────
-
-  async function handleLoadCaptions() {
-    if (!video) return
-    setLoadingPhase('loading-captions')
-    try {
-      const caps = await loadCaptions(videoId, video, settings, (msg, pct) => {
-        setLoadingMsg(msg)
-        setLoadingPct(pct)
-      })
-      setCaptions(caps)
-      setCaptionChoice('done')
-      setLoadingPhase('done')
-    } catch (e) {
-      setLoadingMsg(e.message)
-      setLoadingPhase('error')
-    }
+  if (!submitRes.ok) {
+    const err = await submitRes.json().catch(() => ({}))
+    const msg = err?.message || err?.detail || `HTTP ${submitRes.status}`
+    if (submitRes.status === 401) throw new Error('Invalid Gladia API key. Check Settings.')
+    if (submitRes.status === 429) throw new Error('Gladia quota exceeded. Free tier: 10 hours/month.')
+    throw new Error(`Gladia submission failed: ${msg}`)
   }
 
-  // ── Playback controls ─────────────────────────────────────────────────────
+  const { id, result_url } = await submitRes.json()
+  if (!id) throw new Error('Gladia did not return a job ID')
 
-  function handlePlayPause() {
-    const player = playerRef.current
-    if (!player) return
-    if (isPlaying) player.pauseVideo()
-    else player.playVideo()
+  onProgress?.('Transcribing audio… (3–10 minutes for a typical video)', 15)
+
+  // Poll until done
+  const pollUrl = result_url || `${GLADIA_BASE}/pre-recorded/${id}`
+  const result = await pollGladia(pollUrl, apiKey, onProgress)
+
+  onProgress?.('Processing transcript…', 90)
+
+  const raw = parseResult(result)
+  if (!raw?.length) throw new Error('Gladia returned an empty transcript. The video may have no speech.')
+
+  onProgress?.('Saving to cache…', 96)
+  await setCachedCaptions(videoId, lang, raw)
+
+  onProgress?.('Done', 100)
+  return raw
+}
+
+async function pollGladia(url, apiKey, onProgress) {
+  const MAX = 90       // 90 × 5s = 7.5 minutes max
+  const INTERVAL = 5000
+
+  for (let i = 1; i <= MAX; i++) {
+    await sleep(INTERVAL)
+
+    const res = await fetch(url, { headers: { 'x-gladia-key': apiKey } })
+    if (!res.ok) throw new Error(`Poll failed: HTTP ${res.status}`)
+
+    const data = await res.json()
+
+    if (data.status === 'done') return data.result
+    if (data.status === 'error') throw new Error(`Gladia error: ${data.error_message || 'transcription failed'}`)
+
+    // Progress from 15% → 85% while waiting
+    const pct = Math.min(15 + (i / MAX) * 70, 85)
+    const elapsed = Math.round(i * INTERVAL / 1000)
+    onProgress?.(`Transcribing… ${elapsed}s elapsed`, pct)
   }
 
-  function handleIndexChange(newIdx) {
-    // Record seen for words in the subtitle we're leaving
-    const leaving = captions[currentIndex]
-    if (leaving) markSubtitleSeen(leaving.text)
+  throw new Error('Transcription timed out after 7.5 minutes. Try a shorter video.')
+}
 
-    setCurrentIndex(newIdx)
-    setWordPopup(null)
+function parseResult(result) {
+  const segments = []
 
-    const cap = captions[newIdx]
-    if (cap && playerRef.current?.seekTo) {
-      // Seek if we're more than 1.5s off
-      const currentMs = playerRef.current.getCurrentTime?.() * 1000 || 0
-      if (Math.abs(currentMs - cap.start) > 1500) {
-        playerRef.current.seekTo(cap.start / 1000, true)
-      }
-    }
-
-    // Intensive mode: pause on each new subtitle
-    if (intensiveMode && playerRef.current?.pauseVideo) {
-      playerRef.current.pauseVideo()
-    }
-  }
-
-  function handlePrev() {
-    if (currentIndex > 0) handleIndexChange(currentIndex - 1)
-  }
-
-  function handleNext() {
-    if (currentIndex < captions.length - 1) handleIndexChange(currentIndex + 1)
-  }
-
-  function handleRepeat() {
-    const cap = captions[currentIndex]
-    if (cap && playerRef.current?.seekTo) {
-      playerRef.current.seekTo(cap.start / 1000, true)
-      playerRef.current.playVideo()
-    }
-  }
-
-  function handleSpeedChange(speed) {
-    playerRef.current?.setPlaybackRate?.(speed)
-  }
-
-  async function markSubtitleSeen(text) {
-    // Simple word split for seen tracking
-    const words = text.split(/\s+/).filter(w => w.trim().length > 1)
-    await Promise.all(words.map(w => recordSeen(lang, w.toLowerCase()).catch(() => {})))
-  }
-
-  function handleWordTap(surface, sentence) {
-    setWordPopup({ word: surface, sentence })
-    if (isPlaying) playerRef.current?.pauseVideo?.()
-  }
-
-  function handleSubtitleClick(idx) {
-    handleIndexChange(idx)
-    const cap = captions[idx]
-    if (cap && playerRef.current?.seekTo) {
-      playerRef.current.seekTo(cap.start / 1000, true)
-    }
-  }
-
-  // ── Render ────────────────────────────────────────────────────────────────
-
-  return (
-    <div className="flex flex-col h-full bg-bg">
-      {/* Header bar */}
-      <div className="flex items-center gap-3 px-4 pt-12 pb-3 bg-bg">
-        <button
-          onClick={() => navigate('/')}
-          className="w-9 h-9 flex items-center justify-center rounded-full bg-white/5 text-white/60"
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
-          </svg>
-        </button>
-        <div className="min-w-0 flex-1">
-          <p className="text-white text-sm font-medium truncate">{video?.title || 'Loading…'}</p>
-          <p className="text-white/40 text-xs truncate">{video?.channelTitle}</p>
-        </div>
-        {/* Language badge */}
-        <span className="flex-shrink-0 text-accent text-xs font-display font-semibold bg-accent/10 px-2 py-1 rounded-lg">
-          {lang.slice(0, 2).toUpperCase()}
-        </span>
-      </div>
-
-      {/* YouTube Player (1/3 height) */}
-      <div className="w-full bg-black" style={{ aspectRatio: '16/9', maxHeight: '33vh' }}>
-        <div ref={playerDivRef} className="w-full h-full" />
-      </div>
-
-      {/* Caption choice screen */}
-      {loadingPhase === 'caption-choice' && (
-        <div className="flex-1 flex flex-col items-center justify-center px-6 text-center">
-          <div className="w-14 h-14 bg-accent/10 rounded-2xl flex items-center justify-center mb-5">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-7 h-7 text-accent">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 01.865-.501 48.172 48.172 0 003.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" />
-            </svg>
-          </div>
-          <h2 className="font-display font-bold text-xl text-white mb-2">Load subtitles</h2>
-          <p className="text-white/40 text-sm mb-8 max-w-xs">
-            Transcribe this video with Gladia's Whisper AI — accurate, any language, takes 3–10 minutes. Or skip and just watch.
-          </p>
-          <button
-            onClick={handleLoadCaptions}
-            className="btn-primary w-full max-w-xs mb-3 py-4 rounded-2xl text-base font-display font-semibold"
-          >
-            Transcribe with Gladia
-          </button>
-          <button
-            onClick={() => { setCaptionChoice('done'); setLoadingPhase('done') }}
-            className="text-white/30 text-sm py-3"
-          >
-            Skip — just watch
-          </button>
-        </div>
-      )}
-
-      {/* Loading captions */}
-      {loadingPhase === 'loading-captions' && (
-        <div className="flex-1 flex flex-col items-center justify-center px-8">
-          <div className="w-full max-w-xs">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-5 h-5 border-2 border-accent/30 border-t-accent rounded-full animate-spin flex-shrink-0" />
-              <p className="text-white/60 text-sm">{loadingMsg}</p>
-            </div>
-            <div className="h-1.5 bg-white/10 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-accent rounded-full transition-all duration-500"
-                style={{ width: `${loadingPct}%` }}
-              />
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Error state */}
-      {loadingPhase === 'error' && (
-        <div className="flex-1 flex flex-col items-center justify-center px-6 text-center">
-          <p className="text-red-400 text-sm mb-4">{loadingMsg}</p>
-          <button onClick={() => navigate('/')} className="btn-primary">
-            Go back
-          </button>
-        </div>
-      )}
-
-      {/* Study interface */}
-      {loadingPhase === 'done' && (
-        <>
-          {captions.length > 0 ? (
-            <>
-              <SubtitlePanel
-                captions={captions}
-                currentIndex={currentIndex}
-                translation={translation}
-                showTranslation={settings?.showTranslation}
-                blurTranslation={settings?.blurTranslation}
-                language={lang}
-                onWordTap={handleWordTap}
-                onSubtitleClick={handleSubtitleClick}
-              />
-              <PlaybackControls
-                isPlaying={isPlaying}
-                speed={settings?.playbackSpeed || 1}
-                currentIndex={currentIndex}
-                total={captions.length}
-                onPlayPause={handlePlayPause}
-                onPrev={handlePrev}
-                onNext={handleNext}
-                onRepeat={handleRepeat}
-                onSpeedChange={handleSpeedChange}
-              />
-            </>
-          ) : (
-            <div className="flex-1 flex items-center justify-center">
-              <p className="text-white/30 text-sm">Watching freely — no captions loaded</p>
-            </div>
-          )}
-        </>
-      )}
-
-      {/* Word popup */}
-      {wordPopup && (
-        <WordPopup
-          word={wordPopup.word}
-          sentence={wordPopup.sentence}
-          settings={settings}
-          onClose={() => setWordPopup(null)}
-        />
-      )}
-    </div>
+  // Gladia returns sentences or utterances depending on version
+  const items = (
+    result?.transcription?.sentences ||
+    result?.transcription?.utterances ||
+    []
   )
+
+  for (const item of items) {
+    const text = (item.sentence || item.text || item.transcript || '')
+      .replace(/\n/g, ' ').trim()
+    if (!text) continue
+
+    segments.push({
+      start: Math.round((item.start ?? 0) * 1000),
+      end:   Math.round((item.end   ?? (item.start + 3)) * 1000),
+      text,
+    })
+  }
+
+  // Fallback: if no segments, split full transcript roughly
+  if (!segments.length && result?.transcription?.full_transcript) {
+    const words = result.transcription.full_transcript.split(' ')
+    const chunkSize = 10
+    for (let i = 0; i < words.length; i += chunkSize) {
+      segments.push({
+        start: i * 500,
+        end:   (i + chunkSize) * 500,
+        text:  words.slice(i, i + chunkSize).join(' '),
+      })
+    }
+  }
+
+  return segments
 }
