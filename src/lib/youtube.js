@@ -151,9 +151,11 @@ function parseDuration(iso) {
 // ── Google OAuth (for subscriptions) ─────────────────────────────────────────
 
 export function initiateGoogleAuth(clientId) {
+  // Strip trailing slash — Google OAuth requires exact URI match
+  const redirectUri = (window.location.origin + window.location.pathname).replace(/\/$/, '')
   const params = new URLSearchParams({
     client_id: clientId,
-    redirect_uri: window.location.origin + window.location.pathname,
+    redirect_uri: redirectUri,
     response_type: 'token',
     scope: 'https://www.googleapis.com/auth/youtube.readonly',
     include_granted_scopes: 'true',
