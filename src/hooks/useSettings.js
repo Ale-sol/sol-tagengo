@@ -16,6 +16,7 @@ const DEFAULTS = {
 
   // Caption proxy
   proxyUrl: '',
+  youtubeCookie: '',
 
   // Language
   targetLanguage: 'Japanese',
