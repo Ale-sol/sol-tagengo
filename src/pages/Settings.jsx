@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { PROVIDERS } from '../lib/llm.js'
 import { LANGUAGE_CODES } from '../lib/captions.js'
 import { exportProfile, importProfile } from '../lib/storage.js'
@@ -26,7 +26,27 @@ function Field({ label, hint, children }) {
   )
 }
 
-function ApiKeyField({ label, placeholder, value, onChange, url }) {
+function Toggle({ value, onChange, label, hint }) {
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(!value)}
+      className={`flex items-center justify-between w-full px-4 py-3 rounded-xl border transition-all ${
+        value ? 'border-accent/40 bg-accent/5' : 'border-border'
+      }`}
+    >
+      <div>
+        <span className="text-sm text-white/70 font-sans">{label}</span>
+        {hint && <p className="text-white/30 text-xs">{hint}</p>}
+      </div>
+      <div className={`w-10 h-6 rounded-full transition-colors relative flex-shrink-0 ${value ? 'bg-accent' : 'bg-white/20'}`}>
+        <div className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform ${value ? 'translate-x-5' : 'translate-x-1'}`} />
+      </div>
+    </button>
+  )
+}
+
+function ApiKeyField({ placeholder, value, onChange, url }) {
   const [show, setShow] = useState(false)
   return (
     <div className="flex gap-2">
@@ -37,6 +57,10 @@ function ApiKeyField({ label, placeholder, value, onChange, url }) {
           onChange={e => onChange(e.target.value)}
           placeholder={placeholder}
           className="input pr-10"
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck="false"
         />
         <button
           type="button"
@@ -58,21 +82,42 @@ function ApiKeyField({ label, placeholder, value, onChange, url }) {
           rel="noopener noreferrer"
           className="btn-ghost border border-border rounded-xl px-3 text-xs whitespace-nowrap"
         >
-          Get key ↗
+          Get ↗
         </a>
       )}
     </div>
   )
 }
 
-export default function Settings({ settings, onUpdate }) {
+export default function Settings({ settings, onUpdate, onUpdateMany }) {
+  // Local draft — nothing saves until you hit Save
+  const [draft, setDraft] = useState(settings)
+  const [isDirty, setIsDirty] = useState(false)
+  const [saveState, setSaveState] = useState('idle') // 'idle' | 'saving' | 'saved'
   const [importError, setImportError] = useState('')
-  const [saveMsg, setSaveMsg] = useState('')
 
-  function update(key, val) {
-    onUpdate(key, val)
-    setSaveMsg('Saved')
-    setTimeout(() => setSaveMsg(''), 1500)
+  // Sync draft when settings load from DB initially
+  useEffect(() => {
+    setDraft(settings)
+    setIsDirty(false)
+  }, []) // Only on mount
+
+  function set(key, val) {
+    setDraft(prev => ({ ...prev, [key]: val }))
+    setIsDirty(true)
+  }
+
+  async function handleSave() {
+    setSaveState('saving')
+    try {
+      await onUpdateMany(draft)
+      setIsDirty(false)
+      setSaveState('saved')
+      setTimeout(() => setSaveState('idle'), 2000)
+    } catch (e) {
+      setSaveState('idle')
+      alert('Save failed: ' + e.message)
+    }
   }
 
   async function handleImport(e) {
@@ -82,207 +127,223 @@ export default function Settings({ settings, onUpdate }) {
       const text = await file.text()
       await importProfile(text)
       setImportError('')
-      setSaveMsg('Profile imported!')
-      setTimeout(() => setSaveMsg(''), 2500)
+      setSaveState('saved')
+      setTimeout(() => setSaveState('idle'), 2500)
     } catch (err) {
       setImportError(err.message)
     }
     e.target.value = ''
   }
 
-  const activeProvider = PROVIDERS[settings.llmProvider]
+  const activeProvider = PROVIDERS[draft.llmProvider]
 
   return (
-    <div className="flex flex-col h-full overflow-y-auto px-4 pb-28 pt-12">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="font-display font-bold text-2xl text-white">Settings</h1>
-        {saveMsg && (
-          <span className="text-accent text-xs font-sans animate-fade-in">{saveMsg}</span>
-        )}
-      </div>
+    <div className="flex flex-col h-full">
+      <div className="flex-1 overflow-y-auto px-4 pb-36 pt-12">
 
-      {/* LLM Provider */}
-      <Section title="AI Provider">
-        <Field label="Provider">
-          <div className="grid grid-cols-2 gap-2">
-            {Object.entries(PROVIDERS).map(([id, p]) => (
-              <button
-                key={id}
-                onClick={() => update('llmProvider', id)}
-                className={`py-3 rounded-xl text-sm font-sans font-medium border transition-all active:scale-[0.97] ${
-                  settings.llmProvider === id
-                    ? 'bg-accent text-black border-accent'
-                    : 'border-border text-white/50 hover:text-white'
-                }`}
-              >
-                {p.name}
-              </button>
-            ))}
-          </div>
-        </Field>
+        {/* Header */}
+        <div className="flex items-center justify-between mb-6">
+          <h1 className="font-display font-bold text-2xl text-white">Settings</h1>
+          {isDirty && (
+            <span className="text-yellow-400/70 text-xs font-sans animate-fade-in">
+              Unsaved changes
+            </span>
+          )}
+        </div>
 
-        {activeProvider && (
-          <Field label="Model">
-            <select
-              value={settings.llmModel}
-              onChange={e => update('llmModel', e.target.value)}
-              className="input"
-            >
-              {activeProvider.models.map(m => (
-                <option key={m.id} value={m.id}>{m.label}</option>
+        {/* AI Provider */}
+        <Section title="AI Provider">
+          <Field label="Provider">
+            <div className="grid grid-cols-2 gap-2">
+              {Object.entries(PROVIDERS).map(([id, p]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => set('llmProvider', id)}
+                  className={`py-3 rounded-xl text-sm font-sans font-medium border transition-all active:scale-[0.97] ${
+                    draft.llmProvider === id
+                      ? 'bg-accent text-black border-accent'
+                      : 'border-border text-white/50 hover:text-white'
+                  }`}
+                >
+                  {p.name}
+                </button>
               ))}
-            </select>
+            </div>
           </Field>
-        )}
-      </Section>
 
-      {/* API Keys */}
-      <Section title="API Keys">
-        {Object.entries(PROVIDERS).map(([id, p]) => (
-          <Field key={id} label={p.name}>
+          {activeProvider && (
+            <Field label="Model">
+              <select
+                value={draft.llmModel}
+                onChange={e => set('llmModel', e.target.value)}
+                className="input"
+              >
+                {activeProvider.models.map(m => (
+                  <option key={m.id} value={m.id}>{m.label}</option>
+                ))}
+              </select>
+            </Field>
+          )}
+        </Section>
+
+        {/* API Keys */}
+        <Section title="API Keys">
+          {Object.entries(PROVIDERS).map(([id, p]) => (
+            <Field key={id} label={p.name}>
+              <ApiKeyField
+                placeholder={p.keyPlaceholder}
+                value={draft[`${id}ApiKey`] || ''}
+                onChange={val => set(`${id}ApiKey`, val)}
+                url={p.keyUrl}
+              />
+            </Field>
+          ))}
+
+          <Field label="YouTube Data API Key" hint="Required for video browsing">
             <ApiKeyField
-              label={p.keyLabel}
-              placeholder={p.keyPlaceholder}
-              value={settings[`${id}ApiKey`] || ''}
-              onChange={val => update(`${id}ApiKey`, val)}
-              url={p.keyUrl}
+              placeholder="AIza..."
+              value={draft.youtubeApiKey || ''}
+              onChange={val => set('youtubeApiKey', val)}
+              url="https://console.cloud.google.com"
             />
           </Field>
-        ))}
 
-        <Field
-          label="YouTube Data API Key"
-          hint="Required for video browsing"
-        >
-          <ApiKeyField
-            placeholder="AIza..."
-            value={settings.youtubeApiKey || ''}
-            onChange={val => update('youtubeApiKey', val)}
-            url="https://console.cloud.google.com"
-          />
-        </Field>
-
-        <Field
-          label="Caption Proxy URL"
-          hint="Cloudflare Worker URL for fetching YouTube captions. See README for setup (5 min, free)."
-        >
-          <input
-            type="url"
-            value={settings.proxyUrl || ''}
-            onChange={e => update('proxyUrl', e.target.value)}
-            placeholder="https://your-worker.workers.dev"
-            className="input"
-          />
-        </Field>
-      </Section>
-
-      {/* Language */}
-      <Section title="Language">
-        <Field label="Language you are studying">
-          <div className="grid grid-cols-3 gap-2">
-            {LANGUAGES.map(lang => (
-              <button
-                key={lang}
-                onClick={() => update('targetLanguage', lang)}
-                className={`py-2.5 rounded-xl text-xs font-sans font-medium border transition-all active:scale-[0.97] ${
-                  settings.targetLanguage === lang
-                    ? 'bg-accent text-black border-accent'
-                    : 'border-border text-white/50 hover:text-white'
-                }`}
-              >
-                {lang}
-              </button>
-            ))}
-          </div>
-        </Field>
-      </Section>
-
-      {/* Study */}
-      <Section title="Study Mode">
-        <Field label="Immersion mode">
-          <div className="grid grid-cols-2 gap-2">
-            {[
-              { id: 'intensive', label: '⏸ Intensive', hint: 'Pauses after each line' },
-              { id: 'free', label: '▶ Free Flow', hint: 'Continuous playback' },
-            ].map(({ id, label }) => (
-              <button
-                key={id}
-                onClick={() => update('immersionMode', id)}
-                className={`py-3 rounded-xl text-sm font-sans border transition-all active:scale-[0.97] ${
-                  settings.immersionMode === id
-                    ? 'bg-accent text-black border-accent'
-                    : 'border-border text-white/50'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </Field>
-
-        <Field label="English translation">
-          <div className="space-y-2">
-            {/* Show/hide toggle */}
-            <button
-              onClick={() => update('showTranslation', !settings.showTranslation)}
-              className={`flex items-center justify-between w-full px-4 py-3 rounded-xl border transition-all ${
-                settings.showTranslation ? 'border-accent/40 bg-accent/5' : 'border-border'
-              }`}
-            >
-              <span className="text-sm text-white/70 font-sans">Show translation</span>
-              <div className={`w-10 h-6 rounded-full transition-colors relative ${settings.showTranslation ? 'bg-accent' : 'bg-white/20'}`}>
-                <div className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform ${settings.showTranslation ? 'translate-x-5' : 'translate-x-1'}`} />
-              </div>
-            </button>
-
-            {/* Blur toggle */}
-            {settings.showTranslation && (
-              <button
-                onClick={() => update('blurTranslation', !settings.blurTranslation)}
-                className={`flex items-center justify-between w-full px-4 py-3 rounded-xl border transition-all ${
-                  settings.blurTranslation ? 'border-accent/40 bg-accent/5' : 'border-border'
-                }`}
-              >
-                <div>
-                  <span className="text-sm text-white/70 font-sans">Blur until tapped</span>
-                  <p className="text-white/30 text-xs">Challenge yourself first</p>
-                </div>
-                <div className={`w-10 h-6 rounded-full transition-colors relative ${settings.blurTranslation ? 'bg-accent' : 'bg-white/20'}`}>
-                  <div className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform ${settings.blurTranslation ? 'translate-x-5' : 'translate-x-1'}`} />
-                </div>
-              </button>
-            )}
-          </div>
-        </Field>
-      </Section>
-
-      {/* Profile */}
-      <Section title="Profile">
-        <div className="grid grid-cols-2 gap-3">
-          <button
-            onClick={exportProfile}
-            className="flex items-center justify-center gap-2 py-3 rounded-xl border border-border text-white/60 text-sm font-sans hover:text-white transition-colors active:scale-[0.97]"
+          <Field
+            label="Google OAuth Client ID"
+            hint="Required for Subscriptions tab. Create an OAuth 2.0 Client ID in Google Cloud Console → Credentials."
           >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-4 h-4">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
-            </svg>
-            Export
-          </button>
+            <ApiKeyField
+              placeholder="xxxx.apps.googleusercontent.com"
+              value={draft.googleOAuthClientId || ''}
+              onChange={val => set('googleOAuthClientId', val)}
+              url="https://console.cloud.google.com"
+            />
+          </Field>
 
-          <label className="flex items-center justify-center gap-2 py-3 rounded-xl border border-border text-white/60 text-sm font-sans hover:text-white transition-colors active:scale-[0.97] cursor-pointer">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-4 h-4">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
-            </svg>
-            Import
-            <input type="file" accept=".json" onChange={handleImport} className="sr-only" />
-          </label>
-        </div>
-        {importError && <p className="text-red-400 text-xs mt-2">{importError}</p>}
-        <p className="text-white/25 text-xs mt-2">
-          Export saves all word progress. API keys are excluded from export for security.
-        </p>
-      </Section>
+          <Field
+            label="Caption Proxy URL"
+            hint="Cloudflare Worker URL for fetching captions. See README for the 5-minute setup."
+          >
+            <input
+              type="url"
+              value={draft.proxyUrl || ''}
+              onChange={e => set('proxyUrl', e.target.value)}
+              placeholder="https://your-worker.workers.dev"
+              className="input"
+            />
+          </Field>
+        </Section>
+
+        {/* Language */}
+        <Section title="Language">
+          <Field label="Language you are studying">
+            <div className="grid grid-cols-3 gap-2">
+              {LANGUAGES.map(lang => (
+                <button
+                  key={lang}
+                  type="button"
+                  onClick={() => set('targetLanguage', lang)}
+                  className={`py-2.5 rounded-xl text-xs font-sans font-medium border transition-all active:scale-[0.97] ${
+                    draft.targetLanguage === lang
+                      ? 'bg-accent text-black border-accent'
+                      : 'border-border text-white/50 hover:text-white'
+                  }`}
+                >
+                  {lang}
+                </button>
+              ))}
+            </div>
+          </Field>
+        </Section>
+
+        {/* Study Mode */}
+        <Section title="Study Mode">
+          <Field label="Immersion mode">
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { id: 'intensive', label: '⏸ Intensive', sub: 'Pauses after each line' },
+                { id: 'free', label: '▶ Free Flow', sub: 'Continuous playback' },
+              ].map(({ id, label, sub }) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => set('immersionMode', id)}
+                  className={`py-3 px-3 rounded-xl text-sm font-sans border transition-all active:scale-[0.97] text-left ${
+                    draft.immersionMode === id
+                      ? 'bg-accent text-black border-accent'
+                      : 'border-border text-white/50'
+                  }`}
+                >
+                  <div className="font-medium">{label}</div>
+                  <div className={`text-xs mt-0.5 ${draft.immersionMode === id ? 'text-black/60' : 'text-white/30'}`}>{sub}</div>
+                </button>
+              ))}
+            </div>
+          </Field>
+
+          <Toggle
+            value={draft.showTranslation}
+            onChange={v => set('showTranslation', v)}
+            label="Show English translation"
+          />
+
+          {draft.showTranslation && (
+            <Toggle
+              value={draft.blurTranslation}
+              onChange={v => set('blurTranslation', v)}
+              label="Blur until tapped"
+              hint="Challenge yourself before peeking"
+            />
+          )}
+        </Section>
+
+        {/* Profile */}
+        <Section title="Profile">
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={exportProfile}
+              className="flex items-center justify-center gap-2 py-3 rounded-xl border border-border text-white/60 text-sm font-sans hover:text-white transition-colors active:scale-[0.97]"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-4 h-4">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+              </svg>
+              Export
+            </button>
+            <label className="flex items-center justify-center gap-2 py-3 rounded-xl border border-border text-white/60 text-sm font-sans hover:text-white transition-colors active:scale-[0.97] cursor-pointer">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-4 h-4">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+              </svg>
+              Import
+              <input type="file" accept=".json" onChange={handleImport} className="sr-only" />
+            </label>
+          </div>
+          {importError && <p className="text-red-400 text-xs mt-2">{importError}</p>}
+          <p className="text-white/25 text-xs mt-2">
+            Word progress is saved. API keys are excluded from exports.
+          </p>
+        </Section>
+
+      </div>
+
+      {/* Sticky Save Button */}
+      <div className="fixed bottom-0 inset-x-0 px-4 pb-6 pt-3 bg-gradient-to-t from-bg via-bg to-transparent z-50">
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={!isDirty || saveState === 'saving'}
+          className={`w-full py-4 rounded-2xl font-display font-semibold text-base transition-all active:scale-[0.98] ${
+            saveState === 'saved'
+              ? 'bg-green-500 text-white'
+              : isDirty
+              ? 'bg-accent text-black shadow-lg shadow-accent/20'
+              : 'bg-white/10 text-white/30 cursor-not-allowed'
+          }`}
+        >
+          {saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? '✓ Saved' : isDirty ? 'Save Changes' : 'No Changes'}
+        </button>
+      </div>
     </div>
   )
 }
