@@ -33,7 +33,7 @@ function useGoogleAuth(clientId) {
     loadGIS().then(() => {
       clientRef.current = window.google.accounts.oauth2.initTokenClient({
         client_id: clientId,
-        scope: 'https://www.googleapis.com/auth/youtube.readonly',
+        scope: 'https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/drive.appdata',
         callback: (resp) => {
           if (resp.error) { console.error('GIS error:', resp.error); return }
           const expiry = Date.now() + (resp.expires_in || 3600) * 1000
