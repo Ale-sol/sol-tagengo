@@ -1,13 +1,3 @@
-/**
- * Caption fetching.
- *
- * Strategy:
- * 1. Call InnerTube API to confirm captions exist and get language code/kind
- * 2. Construct an unsigned timedtext URL (no expiring signature)
- * 3. Fetch through Cloudflare Worker proxy
- * 4. Fix segmentation with LLM
- */
-
 import { fixCaptions } from './llm.js'
 import { getCachedCaptions, setCachedCaptions } from './storage.js'
 
@@ -39,36 +29,36 @@ export async function loadCaptions(videoId, videoMeta, settings, onProgress) {
   }
 
   if (!settings.proxyUrl) {
-    throw new Error('Caption Proxy URL not set. Add your Cloudflare Worker URL in Settings and save.')
+    throw new Error('Caption Proxy URL not set in Settings.')
   }
 
   const proxy = settings.proxyUrl.replace(/\/$/, '')
 
-  onProgress?.('Checking available captions…', 15)
+  onProgress?.('Fetching from YouTube…', 20)
 
-  // Step 1: Get track info from InnerTube
-  let trackInfo
+  // Step 1: get signed caption URL from InnerTube
+  let captionUrl
   try {
-    trackInfo = await getTrackInfo(videoId, langCode, lang, proxy)
+    captionUrl = await getSignedCaptionUrl(videoId, langCode, lang, proxy)
   } catch (e) {
     throw new Error(e.message)
   }
 
-  onProgress?.('Downloading captions…', 40)
+  onProgress?.('Downloading captions…', 50)
 
-  // Step 2: Fetch using unsigned timedtext URL
+  // Step 2: fetch the caption data using the signed URL
   let raw
   try {
-    raw = await fetchWithTimedtext(videoId, trackInfo, proxy)
+    raw = await fetchCaption(captionUrl, proxy)
   } catch (e) {
     throw new Error(`Caption download failed: ${e.message}`)
   }
 
-  if (!raw || raw.length === 0) {
-    throw new Error(`No ${lang} caption content found for this video.`)
+  if (!raw?.length) {
+    throw new Error('Captions loaded but appear empty. Try a different video to confirm the setup works.')
   }
 
-  onProgress?.('Fixing sentence breaks with AI…', 60)
+  onProgress?.('Fixing sentence breaks with AI…', 65)
 
   let processed
   try {
@@ -84,9 +74,8 @@ export async function loadCaptions(videoId, videoMeta, settings, onProgress) {
   return processed
 }
 
-// ── Step 1: InnerTube — get language code and kind (asr or manual) ─────────────
-
-async function getTrackInfo(videoId, langCode, langName, proxy) {
+async function getSignedCaptionUrl(videoId, langCode, langName, proxy) {
+  // Call YouTube's internal player API to get the signed caption URL
   const body = JSON.stringify({
     videoId,
     context: {
@@ -99,27 +88,40 @@ async function getTrackInfo(videoId, langCode, langName, proxy) {
     },
   })
 
-  const url = `${proxy}?url=${encodeURIComponent(INNERTUBE_URL)}`
+  const proxied = `${proxy}?url=${encodeURIComponent(INNERTUBE_URL)}`
+
+  const res = await fetch(proxied, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+  })
+
+  if (!res.ok) {
+    throw new Error(`YouTube API returned HTTP ${res.status}. Check your Worker supports POST requests.`)
+  }
+
+  const text = await res.text()
 
   let data
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-    })
-    const text = await res.text()
     data = JSON.parse(text)
-  } catch (e) {
-    // InnerTube failed — skip to direct timedtext attempt
-    console.warn('InnerTube failed, will try timedtext directly:', e)
-    return { langCode, kind: 'asr' }
+  } catch {
+    throw new Error(`YouTube returned invalid data. First 100 chars: ${text.slice(0, 100)}`)
+  }
+
+  if (data.error) {
+    throw new Error(`YouTube error: ${data.error.message}`)
   }
 
   const tracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks
+
   if (!tracks?.length) {
-    // No track info from InnerTube — try anyway
-    return { langCode, kind: 'asr' }
+    // Check if the video is available at all
+    const status = data?.playabilityStatus?.status
+    if (status && status !== 'OK') {
+      throw new Error(`Video not available: ${status}`)
+    }
+    throw new Error(`No captions found for this video in any language.`)
   }
 
   // Find best matching track
@@ -129,52 +131,41 @@ async function getTrackInfo(videoId, langCode, langName, proxy) {
   const track = manual || asr || base
 
   if (!track) {
-    const available = tracks.map(t => t.name?.simpleText || t.languageCode).join(', ')
+    const available = tracks.map(t =>
+      `${t.name?.simpleText || t.languageCode}${t.kind === 'asr' ? ' (auto)' : ''}`
+    ).join(', ')
     throw new Error(`No ${langName} captions. Available: ${available}`)
   }
 
-  return {
-    langCode: track.languageCode,
-    kind: track.kind === 'asr' ? 'asr' : '',
-  }
+  // Use the signed baseUrl from YouTube — add json3 format
+  let url = track.baseUrl
+  // Replace any existing fmt parameter, or add json3
+  url = url.replace(/([?&])fmt=[^&]*/g, '')
+  url += (url.includes('?') ? '&' : '?') + 'fmt=json3'
+
+  return url
 }
 
-// ── Step 2: Fetch using unsigned timedtext URL ────────────────────────────────
+async function fetchCaption(captionUrl, proxy) {
+  const proxied = `${proxy}?url=${encodeURIComponent(captionUrl)}`
+  const res = await fetch(proxied)
 
-async function fetchWithTimedtext(videoId, trackInfo, proxy) {
-  // Try multiple URL formats — YouTube accepts all of these
-  const urls = [
-    // Auto-generated (asr)
-    `https://www.youtube.com/api/timedtext?v=${videoId}&lang=${trackInfo.langCode}&kind=asr&fmt=json3`,
-    // Manual captions
-    `https://www.youtube.com/api/timedtext?v=${videoId}&lang=${trackInfo.langCode}&fmt=json3`,
-    // With name parameter empty
-    `https://www.youtube.com/api/timedtext?v=${videoId}&lang=${trackInfo.langCode}&name=&fmt=json3`,
-    // Base language code only (e.g. zh instead of zh-Hans)
-    `https://www.youtube.com/api/timedtext?v=${videoId}&lang=${trackInfo.langCode.split('-')[0]}&kind=asr&fmt=json3`,
-  ]
-
-  for (const timedtextUrl of urls) {
-    try {
-      const proxied = `${proxy}?url=${encodeURIComponent(timedtextUrl)}`
-      const res = await fetch(proxied)
-
-      if (!res.ok) continue
-
-      const text = await res.text()
-      if (!text || text.length < 10) continue
-
-      let data
-      try { data = JSON.parse(text) } catch { continue }
-
-      const parsed = parseJSON3(data)
-      if (parsed.length > 0) return parsed
-    } catch {
-      continue
-    }
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status} fetching caption data`)
   }
 
-  throw new Error('All caption URL formats returned empty. Video may have no captions for this language.')
+  const text = await res.text()
+
+  if (!text) throw new Error('Empty response from YouTube')
+
+  let data
+  try {
+    data = JSON.parse(text)
+  } catch {
+    throw new Error(`YouTube returned non-JSON: ${text.slice(0, 80)}`)
+  }
+
+  return parseJSON3(data)
 }
 
 function parseJSON3(data) {
@@ -183,15 +174,8 @@ function parseJSON3(data) {
 
   for (const event of events) {
     if (!event.segs || event.tStartMs === undefined) continue
-
-    const text = event.segs
-      .map(s => s.utf8 || '')
-      .join('')
-      .replace(/\n/g, ' ')
-      .trim()
-
+    const text = event.segs.map(s => s.utf8 || '').join('').replace(/\n/g, ' ').trim()
     if (!text || text === ' ') continue
-
     segments.push({
       start: event.tStartMs,
       end: event.tStartMs + (event.dDurationMs || 2000),
