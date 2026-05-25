@@ -222,6 +222,20 @@ export default function Settings({ settings, onUpdate, onUpdateMany }) {
           </Field>
 
           <Field
+            label="YouTube Session Cookie"
+            hint='Fixes caption loading. Get it: Chrome → YouTube.com → F12 → Network tab → click any youtube.com request → Request Headers → copy everything after "cookie:"'
+          >
+            <textarea
+              value={draft.youtubeCookie || ''}
+              onChange={e => set('youtubeCookie', e.target.value)}
+              placeholder="Paste your YouTube cookie string here..."
+              className="input h-20 resize-none text-xs font-mono"
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </Field>
+
+          <Field
             label="Caption Proxy URL"
             hint="Cloudflare Worker URL for fetching captions. See README for the 5-minute setup."
           >
