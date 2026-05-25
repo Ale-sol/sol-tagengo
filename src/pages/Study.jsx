@@ -258,13 +258,13 @@ export default function Study({ settings }) {
           </div>
           <h2 className="font-display font-bold text-xl text-white mb-2">Load subtitles</h2>
           <p className="text-white/40 text-sm mb-8 max-w-xs">
-            Load AI-processed {lang} captions with proper sentence breaks, or skip and watch freely.
+            Transcribe this video with Gladia's Whisper AI — accurate, any language, takes 3–10 minutes. Or skip and just watch.
           </p>
           <button
             onClick={handleLoadCaptions}
             className="btn-primary w-full max-w-xs mb-3 py-4 rounded-2xl text-base font-display font-semibold"
           >
-            Load {lang} captions
+            Transcribe with Gladia
           </button>
           <button
             onClick={() => { setCaptionChoice('done'); setLoadingPhase('done') }}
